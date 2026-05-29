@@ -1,0 +1,8 @@
+*.vtu
+*.pvtu
+*.h5
+output/
+results/
+out/
+*.log
+.vscode/
