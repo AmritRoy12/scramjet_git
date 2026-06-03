@@ -99,24 +99,24 @@ save_solution = SaveSolutionCallback(interval = 1000,
                                      solution_variables = cons2prim)
 
 #amr (only if necesary, otherwise comment)
-amr_indicator = IndicatorLöhner(semi, variable = density)
+# amr_indicator = IndicatorLöhner(semi, variable = density)
 
-amr_controller = ControllerThreeLevel(semi, amr_indicator,
-                                      base_level = 0,
-                                      med_level = 1, med_threshold = 0.05,
-                                      max_level = 3, max_threshold = 0.1)
+# amr_controller = ControllerThreeLevel(semi, amr_indicator,
+#                                       base_level = 0,
+#                                       med_level = 1, med_threshold = 0.05,
+#                                       max_level = 3, max_threshold = 0.1)
 
-amr_callback = AMRCallback(semi, amr_controller,
-                           interval = 5,
-                           adapt_initial_condition = true,
-                           adapt_initial_condition_only_refine = true)                                     
+# amr_callback = AMRCallback(semi, amr_controller,
+#                            interval = 5,
+#                            adapt_initial_condition = true,
+#                            adapt_initial_condition_only_refine = true)                                     
 
 stepsize_callback = StepsizeCallback(cfl = 0.9)
 
 
 callbacks = CallbackSet(summary_callback, steady_state_callback,
                         analysis_callback, alive_callback,
-                        save_solution, amr_callback,
+                        save_solution, #amr_callback,
                         stepsize_callback)
                         
 
