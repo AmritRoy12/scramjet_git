@@ -38,7 +38,8 @@ Mesh.CharacteristicLengthMax = 0.15;
 
 // Physical Groups for Trixi.jl
 // Inflow (supersonic freestream) — Lines 9, 8
-Physical Curve("Left") = {9, 8};
+Physical Curve("Left") = {9};
+Physical Curve("TopInlet") = {8};
 
 // Outflow (supersonic) — Lines 1, 2, 3, 5
 Physical Curve("Right") = {1, 2, 3, 5};
