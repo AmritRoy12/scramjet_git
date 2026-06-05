@@ -1,11 +1,15 @@
 using Trixi
 using LinearAlgebra
-using Trixi: @muladd,summary_box, mpi_isroot, mpi_isparallel, wrap_array,@batch
+using Trixi: @muladd,summary_box, mpi_isroot, mpi_isparallel, wrap_array,@batch,
+            indices2direction, index_to_start_step_2d, get_node_coords, get_node_vars,
+             HDF5, h5open, attributes
 
 using Trixi: TreeMesh, StructuredMesh, StructuredMeshView, UnstructuredMesh2D,
             P4estMesh, P4estMeshView, T8codeMesh
 
 using OrdinaryDiffEqSSPRK: DiscreteCallback
+
+using Printf: @sprintf
 
 # Author Kedar Wagh
 # By default, Julia/LLVM does not use fused multiply-add operations (FMAs).
@@ -22,10 +26,14 @@ using OrdinaryDiffEqSSPRK: DiscreteCallback
 Terminates the integration when the [`residual_steady_state(du, equations)`](@ref)
 falls below the threshold specified by `abstol, reltol`.
 """
-mutable struct mySteadyStateCallback{RealT <: Real}
+mutable struct mySteadyStateCallback{RealT <: Real, NBoundaries}
     abstol::RealT
     reltol::RealT
     output_directory::String
+    save_extra_analysis::Bool
+    boundary_symbols::NTuple{NBoundaries, Symbol}
+    stop_after_NIters::Bool
+    Iters_threshold::Int
 end
 
 function Base.show(io::IO, cb::DiscreteCallback{<:Any, <:mySteadyStateCallback})
@@ -33,7 +41,8 @@ function Base.show(io::IO, cb::DiscreteCallback{<:Any, <:mySteadyStateCallback})
 
     steady_state_callback = cb.affect!
     print(io, "mySteadyStateCallback(abstol=", steady_state_callback.abstol, ", ",
-          "reltol=", steady_state_callback.reltol, ")")
+          "reltol=", steady_state_callback.reltol, "save_extra_analysis=", steady_state_callback.save_extra_analysis, 
+          "output_directory=", steady_state_callback.output_directory, "stop_after_NIters=", steady_state_callback.stop_after_NIters, "Iters_threshold=", steady_state_callback.Iters_threshold, ")")
 end
 
 function Base.show(io::IO, ::MIME"text/plain",
@@ -48,15 +57,21 @@ function Base.show(io::IO, ::MIME"text/plain",
         setup = [
             "absolute tolerance" => steady_state_callback.abstol,
             "relative tolerance" => steady_state_callback.reltol,
-            "output_directory" => abspath(normpath(steady_state_callback.output_directory))
+            "output_directory" => abspath(normpath(steady_state_callback.output_directory)),
+            "save extra analysis" => steady_state_callback.save_extra_analysis ?
+                                     "yes" : "no",
+            "stop after N iters" => steady_state_callback.stop_after_NIters ? "yes" : "no",
+            "N iters threshold" => steady_state_callback.Iters_threshold,
         ]
         summary_box(io, "mySteadyStateCallback", setup)
     end
 end
 
-function mySteadyStateCallback(; abstol = 1.0e-8, reltol = 1.0e-6, output_directory = "out")
+function mySteadyStateCallback(; abstol = 1.0e-8, reltol = 1.0e-6, output_directory = "out", save_extra_analysis = false, 
+                                boundary_symbols, stop_after_NIters = false, Iters_threshold = 1000)
     abstol, reltol = promote(abstol, reltol)
-    steady_state_callback = mySteadyStateCallback(abstol, reltol,output_directory )
+    steady_state_callback = mySteadyStateCallback(abstol, reltol,output_directory, 
+    save_extra_analysis, boundary_symbols, stop_after_NIters, Iters_threshold)
 
     DiscreteCallback(steady_state_callback, steady_state_callback,
                      save_positions = (false, false),
@@ -170,9 +185,106 @@ function save_du_l2_domain(du,dg,cache,mesh::TreeMesh{2}, equations,t, iter, out
     return du_l2norm
 end
 
+# Helper function that saves a space-dependent quantity `values`
+# at every solution/quadrature point `coordinates` at 
+# time `t` and iteration `iter` to disk.
+# The file is written to the `output_directory` with name `varname` in HDF5 (.h5) format.
+# The latter two are retrieved from the `surface_variable`,
+# an instantiation of `AnalysisSurfacePointwise`.
+function save_pointwise_file(output_directory, varname, coordinates, values, t, iter)
+    n_points = length(values)
+
+    filename = joinpath(output_directory, varname) * @sprintf("_%08d.h5", iter)
+
+    h5open(filename, "w") do file
+        # Add context information as attributes
+        attributes(file)["n_points"] = n_points
+        attributes(file)["variable_name"] = varname
+
+        file["time"] = t
+        file["timestep"] = iter
+        file["point_coordinates"] = coordinates
+        file["point_data"] = values
+    end
+end
+
+#to save whatever results at boundary after steady state is reached
+# example of pressure is implemented here, can be changed to any other variable or combination of variables as needed
+function save_extraresults( boundary_symbols, integrator, semi, dg, iter, t, output_directory )
+    
+    @unpack boundaries = semi.cache
+    @unpack node_coordinates, contravariant_vectors = semi.cache.elements
+    @unpack boundary_symbol_indices = semi.boundary_conditions
+
+    #indices = semi.boundary_conditions.boundary_symbol_indices[boundary_symbols]
+
+    indices = Int[]
+    for name in boundary_symbols
+        append!(indices, boundary_symbol_indices[name])
+    end
+    sort!(indices) # Try to achieve some data locality by sorting
+
+    dim = ndims(semi.mesh)
+    n_nodes = nnodes(dg)
+    n_elements = length(indices)
+
+    coordinates = Matrix{real(dg)}(undef, n_elements * n_nodes, dim) # physical coordinates of indices
+    # variable values at indices, change the no here
+    # 1 for dv1/dy
+    values = Matrix{real(dg)}(undef, n_elements * n_nodes, 1) 
+
+    index_range = eachnode(dg)
+    global_node_counter = 1 # Keeps track of solution point number on the surface
+
+    for boundary in indices
+    element = boundaries.neighbor_ids[boundary]
+    node_indices = boundaries.node_indices[boundary]
+    
+    i_node_start, i_node_step = index_to_start_step_2d(node_indices[1], index_range)
+    j_node_start, j_node_step = index_to_start_step_2d(node_indices[2], index_range)
+
+    i_node = i_node_start
+    j_node = j_node_start
+    for node_index in index_range
+        u_node = Trixi.get_node_vars(semi.cache.boundaries.u, semi.equations, dg, node_index,
+                                        boundary)
+
+        x = get_node_coords(node_coordinates, semi.equations, dg, i_node, j_node,
+                            element)
+
+        p_node = Trixi.pressure(u_node, semi.equations)
+
+        coordinates[global_node_counter, 1] = x[1]
+        coordinates[global_node_counter, 2] = x[2]
+        values[global_node_counter, 1] = p_node
+
+        i_node += i_node_step
+        j_node += j_node_step
+        global_node_counter += 1
+        end
+    end
+
+    # Save to disk
+    save_pointwise_file(output_directory, "extra_analysis_final",
+                        coordinates, values, t, iter)
+
+
+    # avoid re-evaluating possible FSAL stages
+    u_modified!(integrator, false)
+    return nothing
+end
+
+
 # the condition
 function (steady_state_callback::mySteadyStateCallback)(u_ode, t, integrator)
-    @unpack abstol, reltol, output_directory = steady_state_callback
+    @unpack abstol, reltol, output_directory, save_extra_analysis = steady_state_callback
+    @unpack stop_after_NIters, Iters_threshold = steady_state_callback
+
+
+    if save_extra_analysis == true
+      @unpack boundary_symbols = steady_state_callback  
+    end
+
     semi = integrator.p
     equations = semi.equations
     dg = semi.solver
@@ -185,16 +297,37 @@ function (steady_state_callback::mySteadyStateCallback)(u_ode, t, integrator)
 
     #save the log10 of L2 of du residual in domain
     l2_du = save_du_l2_domain(du,dg,cache,mesh, equations,t, iter, output_directory)
-    l2_du_rho = l2_du[1]
-
-    threshold_L2 = abstol
     
     terminate = false
-    if l2_du_rho <= threshold_L2
-        terminate = true
+
+    if stop_after_NIters == true
+
+        if iter >= Iters_threshold
+            terminate = true
+
+            if save_extra_analysis == true
+                save_extraresults( boundary_symbols, integrator, semi, dg, iter, t, output_directory )
+            end
+        else
+            terminate = false
+        end
+
     else
-        terminate = false
+
+        l2_du_rho = l2_du[1]
+        threshold_L2 = abstol
+        
+        if l2_du_rho <= threshold_L2
+            terminate = true
+
+            if save_extra_analysis == true
+                save_extraresults( boundary_symbols, integrator, semi, dg, iter, t, output_directory )
+            end
+        else
+            terminate = false
+        end        
     end
+
 
     if mpi_isparallel()
         # MPI.jl doesn't seem to have MPI_C_BOOL
@@ -202,7 +335,7 @@ function (steady_state_callback::mySteadyStateCallback)(u_ode, t, integrator)
         terminate = !iszero(MPI.Allreduce!(Ref(terminate_integer), +, mpi_comm())[])
     end
     if mpi_isroot() && terminate
-        @info "  Steady state tolerance reached" steady_state_callback t
+        @info "  Steady state tolerance/Iterations reached" steady_state_callback t
     end
     return terminate
 end
