@@ -24,7 +24,13 @@ using Printf: @sprintf
     mySteadyStateCallback(; abstol=1.0e-8, reltol=1.0e-6)
 
 Terminates the integration when the [`residual_steady_state(du, equations)`](@ref)
-falls below the threshold specified by `abstol, reltol`.
+falls below the threshold specified by `abstol, reltol`. Also stops the code after NIters.
+The callback writes the log10 of L2 norm of du residual in the domain to a file.
+Termination criteria is when L2 of density is below the threshold.
+
+If stop_after_NIters is true then dont give tolerence or give 1e-14 which is default.
+
+If tolerance is given the set stop_after_NIters to false. Default iters is 1000.
 """
 mutable struct mySteadyStateCallback{RealT <: Real, NBoundaries}
     abstol::RealT
@@ -67,7 +73,7 @@ function Base.show(io::IO, ::MIME"text/plain",
     end
 end
 
-function mySteadyStateCallback(; abstol = 1.0e-8, reltol = 1.0e-6, output_directory = "out", save_extra_analysis = false, 
+function mySteadyStateCallback(; abstol = 1.0e-14, reltol = 0.0, output_directory = "out", save_extra_analysis = false, 
                                 boundary_symbols, stop_after_NIters = false, Iters_threshold = 1000)
     abstol, reltol = promote(abstol, reltol)
     steady_state_callback = mySteadyStateCallback(abstol, reltol,output_directory, 
