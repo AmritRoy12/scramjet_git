@@ -74,7 +74,7 @@ function Base.show(io::IO, ::MIME"text/plain",
 end
 
 function mySteadyStateCallback(; abstol = 1.0e-14, reltol = 0.0, output_directory = "out", save_extra_analysis = false, 
-                                boundary_symbols, stop_after_NIters = false, Iters_threshold = 1000)
+                                boundary_symbols = (:Left,:Right,:Bottom,:Top), stop_after_NIters = false, Iters_threshold = 1000)
     abstol, reltol = promote(abstol, reltol)
     steady_state_callback = mySteadyStateCallback(abstol, reltol,output_directory, 
     save_extra_analysis, boundary_symbols, stop_after_NIters, Iters_threshold)
